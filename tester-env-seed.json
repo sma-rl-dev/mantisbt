@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "app": "mantisbt",
+  "requirements": {
+    "northstar-project": {
+      "status": "present",
+      "evidence": "Seed creates the public Northstar Commerce project."
+    },
+    "mixed-issue-statuses": {
+      "status": "present",
+      "evidence": "Seed creates exactly three issues with new, feedback, and resolved statuses."
+    },
+    "issue-detail-note": {
+      "status": "present",
+      "evidence": "The new Checkout issue has one public dated triage note."
+    }
+  }
+}

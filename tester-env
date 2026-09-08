@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PORT="${PORT:-18317}"
+RUN_ID="${RUN_ID:-default}"
+IMAGE_NAME="${IMAGE_TAG:-tester-env-mantisbt:dev}"
+PROJECT="tester-env-mantisbt-${RUN_ID}"
+
+usage() {
+  cat <<'EOF'
+Usage: ./tester-env [--port PORT] {deploy|seed|verify|reset|stop|status|logs|help}
+
+deploy  build editable source, install MantisBT, and wait for HTTP
+seed    create the fixed Northstar Commerce issue-tracker fixture
+verify  assert the fixed seed is present through MantisBT's database API
+reset   remove only this Compose project's containers and MariaDB volume
+stop    stop only this Compose project (preserves its database)
+status  show this Compose project's services
+logs    follow this Compose project's logs
+EOF
+}
+
+while [[ $# -gt 0 && $1 == --* ]]; do
+  case "$1" in
+    --port) PORT="$2"; shift 2 ;;
+    --help) usage; exit 0 ;;
+    *) usage >&2; exit 2 ;;
+  esac
+done
+
+compose() {
+  PORT="$PORT" IMAGE_TAG="$IMAGE_NAME" docker compose -p "$PROJECT" -f "$SCRIPT_DIR/docker-compose.tester-env.yml" "$@"
+}
+
+case "${1:-help}" in
+  deploy)
+    printf '==> Building editable source and starting MantisBT on http://localhost:%s/\n' "$PORT"
+    compose up --detach --build db app
+    printf '==> Installing MantisBT\n'
+    compose run --rm install
+    for _ in {1..30}; do
+      if curl --fail --silent --show-error "http://localhost:$PORT/login_page.php" >/dev/null; then
+        printf '==> Ready: http://localhost:%s/ (administrator/root)\n' "$PORT"
+        exit 0
+      fi
+      sleep 1
+    done
+    printf 'MantisBT did not become ready\n' >&2
+    exit 1
+    ;;
+  seed) printf '==> Seeding Northstar Commerce\n'; if compose exec -T app php /var/www/html/tester-env-seed.php | grep -q '^Seeded'; then compose exec -T db mariadb -umantisbt -pmantisbt mantisbt < "$SCRIPT_DIR/tester-env-seed.sql"; fi ;;
+  verify) printf '==> Verifying Northstar Commerce seed\n'; compose exec -T app php /var/www/html/tester-env-verify.php ;;
+  reset) printf '==> Removing only %s containers and volumes\n' "$PROJECT"; compose down --volumes --remove-orphans ;;
+  stop) printf '==> Stopping only %s\n' "$PROJECT"; compose stop ;;
+  status) compose ps ;;
+  logs) compose logs --follow ;;
+  help) usage ;;
+  *) usage >&2; exit 2 ;;
+esac
