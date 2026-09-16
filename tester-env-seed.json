@@ -13,6 +13,14 @@
     "issue-detail-note": {
       "status": "present",
       "evidence": "The new Checkout issue has one public dated triage note."
+    },
+    "resolve-custom-field": {
+      "status": "present",
+      "evidence": "Seed links a Resolution Summary string field to Northstar Commerce with display_resolved and require_resolved set and update/report/closed hidden."
+    },
+    "update-only-custom-field": {
+      "status": "present",
+      "evidence": "Seed links a Backlog Rank string field to Northstar Commerce with display_update set only; hidden/optional on resolve, report, and close."
     }
   }
 }

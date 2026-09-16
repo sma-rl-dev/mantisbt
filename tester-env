@@ -49,7 +49,7 @@ case "${1:-help}" in
     printf 'MantisBT did not become ready\n' >&2
     exit 1
     ;;
-  seed) printf '==> Seeding Northstar Commerce\n'; if compose exec -T app php /var/www/html/tester-env-seed.php | grep -q '^Seeded'; then compose exec -T db mariadb -umantisbt -pmantisbt mantisbt < "$SCRIPT_DIR/tester-env-seed.sql"; fi ;;
+  seed) printf '==> Seeding Northstar Commerce\n'; if compose exec -T app php /var/www/html/tester-env-seed.php | grep '^Seeded' >/dev/null; then compose exec -T db mariadb -umantisbt -pmantisbt mantisbt < "$SCRIPT_DIR/tester-env-seed.sql"; fi ;;
   verify) printf '==> Verifying Northstar Commerce seed\n'; compose exec -T app php /var/www/html/tester-env-verify.php ;;
   reset) printf '==> Removing only %s containers and volumes\n' "$PROJECT"; compose down --volumes --remove-orphans ;;
   stop) printf '==> Stopping only %s\n' "$PROJECT"; compose stop ;;
