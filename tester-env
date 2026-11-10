@@ -86,7 +86,7 @@ run_install() {
     _cstat=0 _tstat=0 _estat=0 _pstat=()
     # NB: a second ${PIPESTATUS[i]} reference in the same list is unbound
     # under set -u, so the whole array is captured in one expansion here.
-    compose run --rm install 2>"$_fifo" | tail -c 262144 >"$_out" || _pstat=("${PIPESTATUS[@]}")
+    compose run --rm -T install </dev/null 2>"$_fifo" | tail -c 262144 >"$_out" || _pstat=("${PIPESTATUS[@]}")
     if ((${#_pstat[@]} > 0)); then _cstat=${_pstat[0]}; _tstat=${_pstat[1]:-1}; fi
     wait "$_tailpid" || _estat=$?
     rm -f "$_fifo"
