@@ -33,12 +33,111 @@ compose() {
   PORT="$PORT" IMAGE_TAG="$IMAGE_NAME" docker compose -p "$PROJECT" -f "$SCRIPT_DIR/docker-compose.tester-env.yml" "$@"
 }
 
+# Best-effort installer diagnostics for a failed deploy. Everything runs
+# through compose(), so it is confined to this run's own project; temp
+# files live under the owned SCRIPT_DIR worktree (never /tmp), all
+# captured/printed data has explicit byte caps, and failures here must
+# never mask the original installer error (allocation failures preserve
+# nonzero). Output lands in the launcher-stage log BEFORE the helper's
+# scoped cleanup removes the containers, which is the only retained record
+# of the HTTP 500.
+# The success marker, retry flags, POST payload, DB values, schema, install
+# policy, credentials and seed behavior are all unchanged.
+redact_installer_output() {
+    # Diagnostic-only sanitizer for bounded installer/app-log excerpts. It
+    # covers ONLY known secret-bearing surfaces: credential/cookie/token
+    # header lines (dropped wholesale), keyed secret values (key=value,
+    # key: value, "key": "value", quoted values including spaces, URL
+    # user:password), and ALL quoted HTML value attributes regardless of
+    # attribute name, name/value order or quote style (their contents are
+    # never diagnostic; error text lives in element bodies and passes
+    # through). This is NOT universal free-text redaction: retained
+    # diagnostic logs remain potentially sensitive and must still be
+    # handled as such. Request payloads, cookies and form tokens are never
+    # printed by any call site; this filter is defense in depth for echoed
+    # values.
+    sed -E \
+        -e '/^[^:]{0,80}(authorization|cookie|token)[^:]{0,40}:/Id' \
+        -e 's#(://[^:/'"'"' ]+:)[^@/'"'"' ]+@#\1[REDACTED]@#g' \
+        -e 's/((password|passwd|pwd|secret|token|cookie|sessid|session|auth)[A-Za-z_]*)(["'"'"' ]*[=:] *["'"'"']?)("[^"]*"|'"'"'[^'"'"']*'"'"'|[^"'"'"'&<> ,;]+)/\1\3[REDACTED]/gI' \
+        -e 's/(value[ ]*=[ ]*")[^"]*/\1[REDACTED]/gI' \
+        -e "s/(value[ ]*=[ ]*')[^']*/\1[REDACTED]/gI"
+}
+
+run_install() {
+    # Same installer invocation, POST payload, retries and success marker
+    # ('Installation Complete', matched on raw STDOUT only - never stderr)
+    # as before; only the failure path changes: both streams are captured
+    # to owned temp files under SCRIPT_DIR (the run worktree, home-backed -
+    # never system /tmp), each through an explicit byte cap (stdout ring
+    # 256 KiB, stderr ring 16 KiB via a worktree FIFO drained by a waited
+    # tail, so no writer ever blocks and no stream is unbounded on disk).
+    # On failure a bounded redacted excerpt plus the owned app log tail
+    # (line- AND byte-capped) are printed BEFORE the original nonzero exit,
+    # so the launcher log retains them despite the helper's scoped cleanup.
+    # Marker found on stdout AND container exit 0 AND clean captures is the
+    # only success; any capture error fails closed (never implies success).
+    local _out _err _fifo _cstat _tstat _estat _tailpid _pstat
+    _out=$(mktemp "$SCRIPT_DIR/.tester-env-install-diag-out.XXXXXX") || return $?
+    _err=$(mktemp "$SCRIPT_DIR/.tester-env-install-diag-err.XXXXXX") || { _cstat=$?; rm -f "$_out"; return $_cstat; }
+    _fifo="${_out}.fifo"
+    mkfifo "$_fifo" || { _cstat=$?; rm -f "$_out" "$_err"; return $_cstat; }
+    tail -c 16384 <"$_fifo" >"$_err" & _tailpid=$!
+    _cstat=0 _tstat=0 _estat=0 _pstat=()
+    # NB: a second ${PIPESTATUS[i]} reference in the same list is unbound
+    # under set -u, so the whole array is captured in one expansion here.
+    compose run --rm install 2>"$_fifo" | tail -c 262144 >"$_out" || _pstat=("${PIPESTATUS[@]}")
+    if ((${#_pstat[@]} > 0)); then _cstat=${_pstat[0]}; _tstat=${_pstat[1]:-1}; fi
+    wait "$_tailpid" || _estat=$?
+    rm -f "$_fifo"
+    if [[ $_cstat -eq 0 && $_tstat -eq 0 && $_estat -eq 0 ]] && grep -q 'Installation Complete' "$_out"; then
+        rm -f "$_out" "$_err"
+        return 0
+    fi
+    if [[ $_cstat -ne 0 ]]; then
+        printf '==> MantisBT installer failed (exit %s); bounded redacted response follows:\n' "${_cstat}" >&2
+    else
+        printf '==> MantisBT installer output unusable (container=%s stdout-cap=%s stderr-cap=%s); bounded redacted context follows:\n' "${_cstat}" "${_tstat}" "${_estat}" >&2
+    fi
+    # Failure-only prints are best effort: they must never bypass the
+    # cleanup below or mask the original failure return.
+    redact_installer_output <"$_out" | tail -c 4000 >&2 || true
+    redact_installer_output <"$_err" | tail -c 1000 >&2 || true
+    dump_install_diagnostics >&2 || true
+    rm -f "$_out" "$_err"
+    if [[ $_cstat -ne 0 ]]; then return $_cstat; fi
+    return 1
+}
+
+dump_install_diagnostics() {
+    echo "==> Installer failure context for project ${PROJECT} (bounded tails, redacted):"
+    compose ps 2>&1 || true
+    # Runtime probes for the ADONewConnection('mysqli') -> bool failure: the
+    # installer's 500 carries no message, and a static image inspection cannot
+    # tell a missing extension from a missing ADOdb driver or a PHP fatal.
+    # Every probe is bounded and best effort; none may mask the original error.
+    echo "==> PHP runtime identity (app container):"
+    compose exec -T app php -v 2>&1 | head -c 512 | redact_installer_output || true
+    echo "==> Loaded mysqli/mysqlnd extensions (expected: mysqli and mysqlnd):"
+    compose exec -T app php -m 2>&1 | grep -iE '^(mysqli|mysqlnd)$' | head -c 512 || true
+    echo "==> ADOdb mysqli driver on disk:"
+    compose exec -T app ls -la /var/www/html/vendor/adodb/adodb-php/drivers/adodb-mysqli.inc.php 2>&1 | head -c 1024 || true
+    echo "==> ADONewConnection('mysqli') probe (installer line 304 equivalent):"
+    compose exec -T app php -r 'chdir("/var/www/html"); require "vendor/adodb/adodb-php/adodb.inc.php"; $db = ADONewConnection("mysqli"); var_dump(is_object($db) ? get_class($db) : $db);' 2>&1 | head -c 2048 | redact_installer_output || true
+    echo "==> Direct mysqli connect from the app container to db:"
+    compose exec -T app php -r '$m = @new mysqli("db", "mantisbt", "mantisbt", "mantisbt"); echo $m->connect_errno ? "CONNECT ERROR ".$m->connect_errno.": ".$m->connect_error : "CONNECT OK";' 2>&1 | head -c 1024 | redact_installer_output || true
+    echo "==> Last app log lines (Apache/PHP error stream):"
+    compose logs --tail=60 --no-log-prefix app 2>&1 | head -c 65536 | redact_installer_output | tail -c 16384 || true
+    echo "==> /var/log/apache2/error.log tail (PHP notice/fatal at the 500):"
+    compose exec -T app tail -c 8192 /var/log/apache2/error.log 2>&1 | head -c 8192 | redact_installer_output | tail -c 4096 || true
+}
+
 case "${1:-help}" in
   deploy)
     printf '==> Building editable source and starting MantisBT on http://localhost:%s/\n' "$PORT"
     compose up --detach --build db app
     printf '==> Installing MantisBT\n'
-    compose run --rm install
+    run_install
     for _ in {1..30}; do
       if curl --fail --silent --show-error "http://localhost:$PORT/login_page.php" >/dev/null; then
         printf '==> Ready: http://localhost:%s/ (administrator/root)\n' "$PORT"

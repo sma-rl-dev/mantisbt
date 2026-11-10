@@ -34,9 +34,9 @@ services:
       - /bin/sh
       - -ec
       - >-
-        curl --fail --retry 30 --retry-connrefused --retry-delay 1
+        curl --fail-with-body -sS --retry 30 --retry-connrefused --retry-delay 1
         --data 'install=3&db_type=mysqli&hostname=db&database_name=mantisbt&db_username=mantisbt&db_password=mantisbt&admin_username=root&admin_password=mantisbt-root&timezone=UTC&path='
-        http://app/admin/install.php | grep -q 'Installation Complete'
+        http://app/admin/install.php
 
 volumes:
   db-data:
